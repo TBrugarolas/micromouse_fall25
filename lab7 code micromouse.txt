@@ -1,0 +1,181 @@
+import board
+import time
+from math import pi
+
+import digitalio
+import neopixel
+import rotaryio
+import pwmio
+import adafruit_motor.motor as motor
+
+from irsensor import IRSensors
+
+""" Constants """
+
+ENCODER_TICKS_PER_REVOLUTION = 145
+WHEELBASE_DIAMETER = 78.0 # mm
+WHEEL_DIAMETER = 34.0 # mm
+MAX_DIST = 60 # mm
+STEP = 10 # mm
+
+""" Peripherals """
+
+but = digitalio.DigitalInOut(board.GP3)
+but.pull = digitalio.Pull.UP
+
+# encoders
+lenc = rotaryio.IncrementalEncoder(board.GP12, board.GP13)
+renc = rotaryio.IncrementalEncoder(board.GP19, board.GP18)
+
+# motors
+lmot = motor.DCMotor(
+    pwmio.PWMOut(board.GP16, frequency=20000),
+    pwmio.PWMOut(board.GP17, frequency=20000)
+)
+rmot = motor.DCMotor(
+    pwmio.PWMOut(board.GP15, frequency=20000),
+    pwmio.PWMOut(board.GP14, frequency=20000)
+)
+lmot.decay_mode = motor.SLOW_DECAY
+rmot.decay_mode = motor.SLOW_DECAY
+
+# detectors
+ir = IRSensors(
+    board.GP7,  board.GP5,  board.GP6,  board.GP28, # left
+    board.GP9,  board.GP10, board.GP11, board.GP26, # center
+    board.GP21, board.GP20, board.GP22, board.GP27  # right
+)
+
+""" Main """
+
+def constrain(val, min_val, max_val):
+    return min(max_val, max(val, min_val))
+
+def reset_odometry():
+    lenc.position, renc.position = 0, 0
+
+def drive(theta_target, dist_target):
+    MM_PER_TICK = pi * WHEEL_DIAMETER / ENCODER_TICKS_PER_REVOLUTION
+    integral_ang_error = 0
+    integral_lin_error = 0
+    prev_ang_error = 0
+    prev_lin_error = 0
+    angular_error = 0 - theta_target
+    lin_error = 0 - dist_target
+
+    while angular_error > 0.1 or angular_error < -0.1 or lin_error > 1 or lin_error < -1:
+        left_dist  = lenc.position * MM_PER_TICK
+        right_dist = renc.position * MM_PER_TICK
+
+        dist  = (left_dist + right_dist) / 2
+        theta = (right_dist - left_dist) / WHEELBASE_DIAMETER
+
+        # angular P control
+        Kp_ang = 0.35
+        Ki_ang = 0.05
+        Kd_ang = -0.025
+
+        angular_error = theta - theta_target
+
+        if integral_ang_error < .05 and integral_ang_error > -.05:
+            integral_ang_error = integral_ang_error
+        else:
+            integral_ang_error += angular_error
+
+        ang_derivative_error = (angular_error - prev_ang_error)
+        prev_ang_error = angular_error
+        steer_correction = Kp_ang * angular_error + Ki_ang * integral_ang_error + Kd_ang * ang_derivative_error
+
+        # linear P control
+        Kp_lin = 0.1
+        Ki_lin = 0.0
+        Kd_lin = 0.025
+
+        # linear error?
+        lin_error = dist - dist_target
+        derivative_error = (lin_error - prev_lin_error) # (error 1 - error 2) / 1/20 seconds 
+        prev_lin_error = lin_error
+
+        lin_correction = constrain((Kp_lin * lin_error + Ki_lin * integral_lin_error + Kd_lin * derivative_error), -0.3, 0.3)
+
+        # combine
+        lmot.throttle = constrain(lin_correction - steer_correction, -1, 1)
+        rmot.throttle = constrain(lin_correction + steer_correction, -1, 1)
+
+        print(angular_error, lin_error, integral_ang_error, derivative_error)
+
+        time.sleep(0.05)
+
+def forward():
+    theta_target = 0
+    dist_target = 180
+    MM_PER_TICK = pi * WHEEL_DIAMETER / ENCODER_TICKS_PER_REVOLUTION
+    integral_ang_error = 0
+    integral_lin_error = 0
+    prev_ang_error = 0
+    prev_lin_error = 0
+    angular_error = 0 - theta_target
+    lin_error = 0 - dist_target
+
+    while angular_error > 0.1 or angular_error < -0.1 or lin_error > 1 or lin_error < -1:
+        left_dist  = lenc.position * MM_PER_TICK
+        right_dist = renc.position * MM_PER_TICK
+
+        dist  = (left_dist + right_dist) / 2
+        # theta = (right_dist - left_dist) / WHEELBASE_DIAMETER
+        ir.scan()
+        theta = (ir.lir_a - 45) + (ir.lir_a - ir.lir_b)
+
+        # angular P control
+        Kp_ang = 0.2
+        Ki_ang = 0.05
+        Kd_ang = -0.025
+        theta = 0
+
+        angular_error = theta - theta_target
+
+        if integral_ang_error < .05 and integral_ang_error > -.05:
+            integral_ang_error = integral_ang_error
+        else:
+            integral_ang_error += angular_error
+
+        ang_derivative_error = (angular_error - prev_ang_error)
+        prev_ang_error = angular_error
+        steer_correction = Kp_ang * angular_error + Ki_ang * integral_ang_error + Kd_ang * ang_derivative_error
+
+        # linear P control
+        Kp_lin = 0.1
+        Ki_lin = 0.0
+        Kd_lin = 0.025
+
+        # linear error?
+        lin_error = dist - dist_target
+        derivative_error = (lin_error - prev_lin_error) # (error 1 - error 2) / 1/20 seconds 
+        prev_lin_error = lin_error
+
+        lin_correction = constrain((Kp_lin * lin_error + Ki_lin * integral_lin_error + Kd_lin * derivative_error), -0.3, 0.3)
+
+        # combine
+        lmot.throttle = constrain(lin_correction - steer_correction, -.3, .3)
+        rmot.throttle = constrain(lin_correction + steer_correction, -.3, .3)
+
+        print(angular_error, lin_error, integral_ang_error, derivative_error)
+
+        time.sleep(0.05)
+
+if __name__ == "__main__":
+    drive(0, 200)
+    print("drove 100mm forward")
+    time.sleep(2)
+    reset_odometry()
+    drive(pi/2, 0)
+    print("turned left")
+    time.sleep(2)
+    reset_odometry()
+    drive(0, 200)
+    print("drove 100mm forward")
+    time.sleep(2)
+    reset_odometry()
+    drive(pi/2, 0)
+
+    
